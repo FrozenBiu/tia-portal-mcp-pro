@@ -1,0 +1,99 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>tia-mcp</ToolCommandName>
+    <PackageId>TiaMcpServer</PackageId>
+    <Description>Model Context Protocol (MCP) server for Siemens SIMATIC TIA Portal V21. Enables MCP
+      clients and AI agents to inspect, diagnose, and automate TIA Portal projects via Siemens
+      Openness.</Description>
+    <PackageTags>mcp;model-context-protocol;tia-portal;siemens;automation;plc;openness</PackageTags>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.14" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.403" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TiaMcpServer.Contracts\TiaMcpServer.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+    <Content Include="../templates/**/*" Condition="Exists('$(MSBuildProjectDirectory)\..\templates')" Pack="true" PackagePath="tools/net10.0/any/templates/%(RecursiveDir)%(Filename)%(Extension)" Link="templates/%(RecursiveDir)%(Filename)%(Extension)" ExcludeFromSingleFile="true" />
+    <Content Include="HmiBasic/Assets/**/*" Condition="Exists('$(MSBuildProjectDirectory)\HmiBasic\Assets')" Pack="true" PackagePath="tools/net10.0/any/HmiBasic/Assets/%(RecursiveDir)%(Filename)%(Extension)" Link="HmiBasic/Assets/%(RecursiveDir)%(Filename)%(Extension)" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <Target Name="BuildOpennessWorker" BeforeTargets="Build">
+    <MSBuild Projects="..\TiaMcpServer.OpennessWorker\TiaMcpServer.OpennessWorker.csproj"
+      Targets="Build"
+      Properties="Configuration=$(Configuration)"
+      RemoveProperties="TargetFramework;TargetFrameworks;RuntimeIdentifier;SelfContained;PackAsTool" />
+  </Target>
+
+  <Target Name="CopyOpennessWorker" AfterTargets="Build" BeforeTargets="PackTool">
+    <RemoveDir Directories="$(OutputPath)openness-worker" />
+    <ItemGroup>
+      <OpennessWorkerFiles
+        Include="..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\**\*.*"
+        Exclude="..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\Siemens.Engineering*.dll;..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\**\*.runtimeconfig.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(OpennessWorkerFiles)"
+      DestinationFiles="@(OpennessWorkerFiles->'$(OutputPath)openness-worker\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="RegisterOpennessWorkerPublishFiles" AfterTargets="ComputeFilesToPublish">
+    <RemoveDir Directories="$(PublishDir)openness-worker" />
+    <ItemGroup>
+      <OpennessWorkerPublishFiles
+        Include="..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\**\*.*"
+        Exclude="..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\Siemens.Engineering*.dll;..\TiaMcpServer.OpennessWorker\bin\$(Configuration)\net48\**\*.runtimeconfig.json" />
+      <ResolvedFileToPublish Include="@(OpennessWorkerPublishFiles)">
+        <RelativePath>openness-worker\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyPortableAssetsToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <PortableTemplateFiles Include="$(MSBuildProjectDirectory)\..\templates\**\*" Condition="Exists('$(MSBuildProjectDirectory)\..\templates')" />
+      <PortableHmiAssetFiles Include="$(MSBuildProjectDirectory)\HmiBasic\Assets\**\*" Condition="Exists('$(MSBuildProjectDirectory)\HmiBasic\Assets')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PortableTemplateFiles)"
+      DestinationFiles="@(PortableTemplateFiles->'$(OutputPath)templates\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(PortableHmiAssetFiles)"
+      DestinationFiles="@(PortableHmiAssetFiles->'$(OutputPath)HmiBasic\Assets\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="RegisterPortableAssetsPublishFiles" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <PortableTemplatePublishFiles Include="$(MSBuildProjectDirectory)\..\templates\**\*" Condition="Exists('$(MSBuildProjectDirectory)\..\templates')" />
+      <PortableHmiAssetPublishFiles Include="$(MSBuildProjectDirectory)\HmiBasic\Assets\**\*" Condition="Exists('$(MSBuildProjectDirectory)\HmiBasic\Assets')" />
+      <ResolvedFileToPublish Include="@(PortableTemplatePublishFiles)">
+        <RelativePath>templates\%(PortableTemplatePublishFiles.RecursiveDir)%(PortableTemplatePublishFiles.Filename)%(PortableTemplatePublishFiles.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="@(PortableHmiAssetPublishFiles)">
+        <RelativePath>HmiBasic\Assets\%(PortableHmiAssetPublishFiles.RecursiveDir)%(PortableHmiAssetPublishFiles.Filename)%(PortableHmiAssetPublishFiles.Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+</Project>

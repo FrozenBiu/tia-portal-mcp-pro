@@ -1,0 +1,82 @@
+using TiaMcpServer.Tests.TestSupport;
+using Xunit;
+
+namespace TiaMcpServer.Tests.Project;
+
+public class ProjectTraversalSourceContractTests
+{
+    [Fact]
+    public void ProjectDeviceEnumerator_KeepsStructuralLocatorsInternalToTheWorkerTraversal()
+    {
+        var source = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Project", "ProjectDeviceEnumerator.cs");
+
+        Assert.Contains("internal sealed class LocatedProjectDevice", source, StringComparison.Ordinal);
+        Assert.Contains("StructuralLocator", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("HardwareConfigInfo", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SubnetInfo", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HardwareAndTreeReaders_UseTheSameProjectDeviceEnumerator()
+    {
+        var hardware = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Network", "HardwareConfigReader.cs");
+        var tree = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Project", "ProjectTreeSnapshotWalker.cs");
+
+        Assert.Contains("capture.Traverse(() => ProjectDeviceEnumerator.Enumerate(project), device =>", hardware, StringComparison.Ordinal);
+        Assert.Contains("candidates.Add((device, nameEvidence));", hardware, StringComparison.Ordinal);
+        Assert.Contains("}, \"deviceEnumeration\", \"deviceMaterialization\");", hardware, StringComparison.Ordinal);
+        Assert.Contains("result.DiscoveryEvidence = capture.Evidence;", hardware, StringComparison.Ordinal);
+        Assert.Contains("ProjectDeviceEnumerator.Enumerate(project).Cast<Device>().ToList()", tree, StringComparison.Ordinal);
+        Assert.DoesNotContain("foreach (Device device in project.Devices)", hardware, StringComparison.Ordinal);
+        Assert.DoesNotContain("foreach (Device device in project.Devices)", tree, StringComparison.Ordinal);
+        Assert.Contains("devices.Select(device => WalkDevice(device, skipped)).ToList()", tree, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectTreeSnapshotWalker_TraversesEverySystemBlockGroupWithItsOwnTypedWalker()
+    {
+        var source = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Project", "ProjectTreeSnapshotWalker.cs");
+
+        Assert.Contains("group is PlcBlockSystemGroup systemGroup", source, StringComparison.Ordinal);
+        Assert.Contains("foreach (PlcSystemBlockGroup childGroup in systemGroup.SystemBlockGroups)", source, StringComparison.Ordinal);
+        Assert.Contains("WalkSystemBlockGroup(childGroup", source, StringComparison.Ordinal);
+        Assert.Contains("foreach (PlcBlock block in group.Blocks)", source, StringComparison.Ordinal);
+        Assert.Contains("foreach (PlcSystemBlockGroup childGroup in group.Groups)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectTreeSnapshotWalker_MarksSystemMembershipWithoutChangingFunctionalBlockTypes()
+    {
+        var source = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Project", "ProjectTreeSnapshotWalker.cs");
+
+        Assert.Contains("NodeType = ProjectTreeNodeTypes.SystemBlockFolder", source, StringComparison.Ordinal);
+        Assert.Contains("details[\"IsSystemBlock\"] = \"true\";", source, StringComparison.Ordinal);
+        Assert.Contains("BuildBlockNode(block, softwareUnitName, isSystemBlock: false)", source, StringComparison.Ordinal);
+        Assert.Contains("BuildBlockNode(block, softwareUnitName, isSystemBlock: true)", source, StringComparison.Ordinal);
+        Assert.Equal(1, RepositoryFiles.CountOccurrences(source, "NodeType = block switch"));
+        Assert.Contains("block.HeaderAuthor", source, StringComparison.Ordinal);
+        Assert.Contains("block.HeaderVersion", source, StringComparison.Ordinal);
+        Assert.Contains("block.HeaderFamily", source, StringComparison.Ordinal);
+        Assert.Contains("block.HeaderName", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("GetAttribute(", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SelectedDevice_IsResolvedBeforeAnyPlcSoftwareDiscovery()
+    {
+        var source = RepositoryFiles.ReadSource(
+            "TiaMcpServer.OpennessWorker", "Openness", "Project", "ProjectTreeSnapshotWalker.cs");
+        var enumerate = source.IndexOf("ProjectDeviceEnumerator.Enumerate(project)", StringComparison.Ordinal);
+        var select = source.IndexOf("ProjectTreeDeviceSelector.Select", StringComparison.Ordinal);
+        var walk = source.IndexOf("WalkDevice(selectedDevice, skipped)", StringComparison.Ordinal);
+
+        Assert.True(enumerate >= 0 && select > enumerate && walk > select);
+        Assert.DoesNotContain("[\"Path\"]", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("CombinePath", source, StringComparison.Ordinal);
+    }
+}

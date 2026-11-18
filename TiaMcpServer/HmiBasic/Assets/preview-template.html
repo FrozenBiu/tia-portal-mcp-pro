@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WinCC Basic preview: {{SCREEN_NAME}}</title>
+  <style>
+    :root { color-scheme: light; font: 14px/1.4 "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; color: #17212b; background: #e8edf1; }
+    h1 { margin: 0 0 14px; font-size: 18px; font-weight: 600; }
+    .viewport { width: min(800px, 100%); aspect-ratio: 5 / 3; overflow: hidden; border: 1px solid #8493a0; background: #0f172a; box-shadow: 0 2px 8px #17212b33; }
+    .viewport svg { display: block; width: 100%; height: 100%; }
+    details { margin-top: 12px; }
+    pre { max-height: 240px; overflow: auto; padding: 12px; background: #fff; border: 1px solid #c3cdd5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 560px) { body { padding: 12px; } }
+  </style>
+</head>
+<body>
+  <h1>{{SCREEN_NAME}} <small>800 x 480</small></h1>
+  <main class="viewport" aria-label="800 by 480 HMI design preview">
+    <svg viewBox="0 0 800 480" role="img" aria-label="WinCC Basic screen canvas">
+      <rect width="800" height="480" fill="#0f172a" />
+      <rect width="800" height="50" fill="#1e293b" />
+      <text x="24" y="32" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">{{SCREEN_NAME}}</text>
+      <rect x="16" y="68" width="768" height="280" rx="4" fill="#ffffff" />
+      <text x="32" y="104" fill="#17212b" font-family="Tahoma, sans-serif" font-size="20" font-weight="bold">KTP700 HMI</text>
+      <text x="32" y="138" fill="#526171" font-family="Tahoma, sans-serif" font-size="14">Tag table: {{TAG_TABLE_NAME}}</text>
+      <rect x="24" y="376" width="232" height="72" rx="4" fill="#047c73" />
+      <text x="140" y="419" text-anchor="middle" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">START</text>
+      <rect x="284" y="376" width="232" height="72" rx="4" fill="#b93838" />
+      <text x="400" y="419" text-anchor="middle" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">STOP</text>
+      <rect x="544" y="376" width="232" height="72" rx="4" fill="#365c7d" />
+      <text x="660" y="419" text-anchor="middle" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">RESET</text>
+    </svg>
+  </main>
+  <details><summary>Screen SimaticML</summary><pre>{{SCREEN_XML}}</pre></details>
+  <details><summary>Tag table SimaticML</summary><pre>{{TAG_XML}}</pre></details>
+</body>
+</html>

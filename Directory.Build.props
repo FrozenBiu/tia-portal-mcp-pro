@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <TiaPortalV21RegistryRoot Condition="'$(TiaPortalV21RegistryRoot)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Siemens\Automation\_InstalledSW\TIAP21\Global', 'Path', '', RegistryView.Registry64, RegistryView.Registry32))</TiaPortalV21RegistryRoot>
+    <TiaPortalV21RegistryRoot Condition="'$(TiaPortalV21RegistryRoot)' == ''">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Siemens\Automation\InstalledApps\Totally Integrated Automation Portal V21', 'INSTALLPATH', '', RegistryView.Registry64, RegistryView.Registry32))</TiaPortalV21RegistryRoot>
+    <TiaPortalV21Root Condition="'$(TiaPortalV21Root)' == '' and '$(TiaPortalV21Dir)' == '' and '$(TiaPortalLocation)' != ''">$(TiaPortalLocation)</TiaPortalV21Root>
+    <TiaPortalV21Root Condition="'$(TiaPortalV21Root)' == '' and '$(TiaPortalV21Dir)' == '' and '$(TIA_PORTAL_ROOT)' != ''">$(TIA_PORTAL_ROOT)</TiaPortalV21Root>
+    <TiaPortalV21Root Condition="'$(TiaPortalV21Root)' == ''">$(TiaPortalV21RegistryRoot)</TiaPortalV21Root>
+    <TiaPortalV21Root Condition="'$(TiaPortalV21Root)' == '' and '$(ProgramFiles)' != ''">$(ProgramFiles)\Siemens\Automation\Portal V21</TiaPortalV21Root>
+    <TiaPortalV21Dir Condition="'$(TiaPortalV21Dir)' == '' and '$(TiaPortalV21Root)' != ''">$(TiaPortalV21Root)\PublicAPI\V21\net48</TiaPortalV21Dir>
+  </PropertyGroup>
+</Project>

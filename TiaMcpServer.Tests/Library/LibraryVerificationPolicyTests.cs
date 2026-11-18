@@ -1,0 +1,325 @@
+using TiaMcpServer.Contracts.Library;
+using TiaMcpServer.Library;
+using TiaMcpServer.OperationBatches;
+using TiaMcpServer.Safety.Pipeline;
+using TiaMcpServer.Worker;
+using Xunit;
+
+namespace TiaMcpServer.Tests.Library;
+
+public sealed class LibraryVerificationPolicyTests
+{
+    [Theory]
+    [InlineData("create_global", false, "trusted")]
+    [InlineData("create_folder", false, "trusted")]
+    [InlineData("create_master_copy", false, "trusted")]
+    [InlineData("delete_type", false, "trusted")]
+    [InlineData("set_comments", false, "superseded")]
+    [InlineData("set_languages", false, "superseded")]
+    [InlineData("create_global", true, "trusted")]
+    [InlineData("create_folder", true, "trusted")]
+    [InlineData("create_master_copy", true, "trusted")]
+    [InlineData("delete_type", true, "trusted")]
+    [InlineData("set_comments", true, "superseded")]
+    [InlineData("set_languages", true, "superseded")]
+    public async Task MetadataKeys_DoNotSupersedeAssets(string earlierOperation, bool failedWithoutOutcome, string expected)
+    {
+        var first = Item("a", earlierOperation); first.LibraryName = "Fixture";
+        var later = Item("b", "set_comments"); later.LibraryName = "Fixture";
+        var earlierEffect = Effect();
+        if (earlierOperation is "create_global" or "set_comments" or "set_languages") earlierEffect = earlierEffect with { Target = null };
+        if (earlierOperation == "delete_type") earlierEffect = earlierEffect with { Target = null, Type = new() { TypeGuid = Guid.NewGuid().ToString("D") } };
+        var effects = new Dictionary<string, LibraryWriteEffect> { ["a"] = earlierEffect };
+        if (!failedWithoutOutcome) effects["b"] = Effect() with { Target = null };
+        var last = failedWithoutOutcome ? LibraryWritePayloadContract.Project(later, WorkerCallResult.Fail("worker_operation_failed", "attempted")) : Succeeded(later);
+        var policy = new LibraryVerificationPolicy(effects, [first, later]);
+        var result = await new TrustedWriteVerifier<LibraryWriteItem>([first, later], policy)
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(first), last]));
+        Assert.Equal(expected, result.Operations[0].Check);
+        Assert.False(policy.HasReadBack(later));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MetadataKeys_OutcomeFreeAliasesStayWithinMetadata(bool exactPath)
+    {
+        var first = Item("a", "set_comments"); first.LibraryPath = @"C:\One\Fixture.al21";
+        var second = Item("b", "set_languages"); second.LibraryPath = @"C:\Two\Fixture.al21";
+        var later = Item("c", "set_languages"); later.LibraryName = exactPath ? null : "Fixture";
+        later.LibraryPath = exactPath ? first.LibraryPath : null;
+        var items = new[] { first, second, later };
+        var effects = new Dictionary<string, LibraryWriteEffect> { ["a"] = Effect(path: first.LibraryPath) with { Target = null },
+            ["b"] = Effect(path: second.LibraryPath) with { Target = null } };
+        var result = await new TrustedWriteVerifier<LibraryWriteItem>(items, new LibraryVerificationPolicy(effects, items))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(first), Succeeded(second),
+                LibraryWritePayloadContract.Project(later, WorkerCallResult.Fail("worker_operation_failed", "attempted"))]));
+        Assert.Equal(new[] { "superseded", exactPath ? "trusted" : "superseded" }, result.Operations.Select(x => x.Check));
+    }
+
+    [Theory]
+    [InlineData("save_global")]
+    [InlineData("close_global")]
+    [InlineData("archive_global")]
+    public async Task WholeLibraryLifecycle_SupersedesMetadata(string operation)
+        => Assert.Equal(new[] { "superseded", "trusted" }, await Verify(
+            (Item("a", "set_comments"), Effect() with { Target = null }), (Item("b", operation), Effect() with { Target = null })));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LastVersionDeletion_SupersedesOwningType(bool failedWithOutcome)
+        => Assert.Equal("superseded", await TypeVersionCheck("set_default_type_version", "delete_type_version", true, false, failedWithOutcome));
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReplacedInWork_SupersedesDifferentVersionGuid(bool failedWithOutcome)
+        => Assert.Equal("superseded", await TypeVersionCheck("create_type_version", "create_type_version", false, true, failedWithOutcome));
+
+    [Theory]
+    [InlineData("create_type_version", false)]
+    [InlineData("create_type_version", true)]
+    [InlineData("delete_type_version", false)]
+    [InlineData("delete_type_version", true)]
+    public async Task SiblingVersionWithoutTypeRemovalOrReplacement_RemainsTrusted(string laterOperation, bool failedWithOutcome)
+        => Assert.Equal("trusted", await TypeVersionCheck("create_type_version", laterOperation, false, false, failedWithOutcome));
+
+    private static async Task<string> TypeVersionCheck(string firstOperation, string laterOperation, bool typeDeleted, bool replaced, bool failedWithOutcome)
+    {
+        var first = new LibraryWriteItem { OperationId = "a", Operation = firstOperation, Scope = "project" };
+        var later = new LibraryWriteItem { OperationId = "b", Operation = laterOperation, Scope = "project" };
+        var typeGuid = Guid.NewGuid().ToString("D");
+        var oldVersion = new LibraryTypeResultInfo { TypeName = "Motor", TypeGuid = typeGuid, VersionGuid = Guid.NewGuid().ToString("D") };
+        var newVersion = new LibraryTypeResultInfo { TypeName = "Motor", TypeGuid = typeGuid, VersionGuid = Guid.NewGuid().ToString("D"),
+            TypeDeleted = typeDeleted, ReplacedInWork = replaced };
+        var effects = new Dictionary<string, LibraryWriteEffect>
+        {
+            ["a"] = Effect(scope: "project") with { Target = null, Type = oldVersion },
+            ["b"] = Effect(scope: "project") with { Library = failedWithOutcome ? null : new() { Scope = "project" }, Target = null, Type = newVersion },
+        };
+        var last = failedWithOutcome ? LibraryWritePayloadContract.Project(later,
+            WorkerCallResult.Fail("worker_operation_failed", "read-back failed") with { LibraryWriteOutcome = new() { Type = newVersion } }) : Succeeded(later);
+        var verification = await new TrustedWriteVerifier<LibraryWriteItem>([first, later], new LibraryVerificationPolicy(effects))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(first), last]));
+        return verification.Operations[0].Check;
+    }
+
+    [Theory]
+    [InlineData("global", "superseded")]
+    [InlineData("project", "trusted")]
+    public async Task Instantiate_GlobalSource_SupersedesEarlierProjectLibraryItems(string sourceScope, string expected)
+    {
+        var typeGuid = Guid.NewGuid().ToString("D");
+        var delete = new LibraryWriteItem { OperationId = "a", Operation = "delete_type_version", Scope = "project", TypeGuid = typeGuid, InWork = true };
+        var instantiate = new LibraryWriteItem { OperationId = "b", Operation = "instantiate_type_version", SourceScope = sourceScope,
+            TypeGuid = typeGuid, PlcName = "PLC" };
+        var effect = Effect(scope: "project") with { Target = null, Type = new() { TypeGuid = typeGuid, TypeName = "Motor", VersionGuid = Guid.NewGuid().ToString("D") } };
+        Assert.Equal(new[] { expected, "trusted" }, await Verify((delete, effect), (instantiate, effect)));
+    }
+
+    [Fact]
+    public async Task Verification_KeysFromResolvedIdentity()
+    {
+        var a = new LibraryWriteItem { OperationId = "a", Operation = "set_default_type_version", Scope = "project", TypeName = "Alias" };
+        var b = new LibraryWriteItem { OperationId = "b", Operation = "delete_type", Scope = "project", TypeGuid = Guid.NewGuid().ToString() };
+        var effect = Effect(scope: "project") with { Target = null, Type = new() { TypeGuid = b.TypeGuid, TypeName = "Actual" } };
+        Assert.Equal(new[] { "superseded", "trusted" }, await Verify((a, effect), (b, effect)));
+    }
+
+    [Fact]
+    public async Task Verification_AttemptedWithoutOutcome_SupersedesLibrary()
+    {
+        var a = Item("a"); a.LibraryName = "Fixture";
+        var b = Item("b"); b.LibraryName = "Fixture";
+        var verification = await new TrustedWriteVerifier<LibraryWriteItem>([a, b],
+            new LibraryVerificationPolicy(new Dictionary<string, LibraryWriteEffect> { ["a"] = Effect() }))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(a),
+                LibraryWritePayloadContract.Project(b, WorkerCallResult.Fail("worker_operation_failed", "failed"))]));
+        Assert.Equal("superseded", Assert.Single(verification.Operations).Check);
+    }
+
+    [Theory]
+    [InlineData("worker_operation_failed", false, "superseded", "superseded")]
+    [InlineData("target_ambiguous", false, "trusted", "trusted")]
+    [InlineData("worker_operation_failed", true, "superseded", "trusted")]
+    public async Task OutcomeFreeFailure_NameAliasCoversEveryPlausibleLibrary(string category, bool exactPath, string firstCheck, string secondCheck)
+    {
+        var first = Item("a"); first.LibraryPath = @"C:\One\Fixture.al21"; first.LibraryName = null;
+        var second = Item("b"); second.LibraryPath = @"C:\Two\Fixture.al21"; second.LibraryName = null;
+        var later = Item("c"); later.LibraryName = exactPath ? null : "Fixture";
+        later.LibraryPath = exactPath ? first.LibraryPath : null;
+        var items = new[] { first, second, later };
+        var effects = new Dictionary<string, LibraryWriteEffect> { ["a"] = Effect(path: first.LibraryPath), ["b"] = Effect(path: second.LibraryPath) };
+        var result = await new TrustedWriteVerifier<LibraryWriteItem>(items, new LibraryVerificationPolicy(effects, items))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(first), Succeeded(second),
+                LibraryWritePayloadContract.Project(later, WorkerCallResult.Fail(category, "uncertain request"))]));
+        Assert.Equal(new[] { firstCheck, secondCheck }, result.Operations.Select(x => x.Check));
+    }
+    [Fact]
+    public async Task CanonicalLibraryIdentityUnifiesNameAndPathAliases()
+    {
+        var first = Item("a"); first.LibraryName = "Fixture";
+        var second = Item("b"); second.LibraryPath = @"c:\Libraries\sub\..\Fixture.al21";
+        Assert.Equal(["superseded", "trusted"], await Verify((first, Effect()), (second, Effect(path: @"c:\libraries\Fixture.al21"))));
+        Assert.Equal(["trusted", "trusted"], await Verify((first, Effect()), (second, Effect(path: @"C:\Other\Fixture.al21"))));
+        Assert.Equal(["trusted", "trusted"], await Verify((first, Effect(scope: "project")), (second, Effect())));
+    }
+
+    [Fact]
+    public async Task ResolvedCreateTargetUsesActualSourceName()
+    {
+        var create = Item("a", "create_master_copy"); create.PlcObjectName = "source";
+        var delete = Item("b"); delete.Name = "Source";
+        Assert.Equal(["superseded", "trusted"], await Verify((create, Effect(name: "Source")), (delete, Effect(name: "Source"))));
+    }
+
+    [Theory]
+    [InlineData("same", true)]
+    [InlineData("leaf-case", true)]
+    [InlineData("folder-case", false)]
+    [InlineData("sibling", false)]
+    [InlineData("folder-kind", false)]
+    [InlineData("object-kind", false)]
+    [InlineData("literal-slash", false)]
+    [InlineData("literal-newline", false)]
+    public async Task KeysRespectKindsAndSegmentBoundaries(string scenario, bool superseded)
+    {
+        var first = Effect(folder: ["A"], name: "Copy");
+        var second = scenario switch
+        {
+            "leaf-case" => Effect(folder: ["A"], name: "COPY"),
+            "folder-case" => Effect(folder: ["a"]),
+            "sibling" => Effect(folder: ["AB"]),
+            "folder-kind" => Effect(folder: ["A"], folderKind: "types"),
+            "object-kind" => Effect(folder: ["A", "Copy"], name: "Copy", kind: "folder"),
+            "literal-slash" => Effect(folder: ["A/Copy"], kind: "folder"),
+            "literal-newline" => Effect(folder: ["A\nmasterCopy\nCOPY"], kind: "folder"),
+            _ => Effect(folder: ["A"]),
+        };
+        var checks = await Verify((Item("a"), first), (Item("b"), second));
+        Assert.Equal(superseded ? "superseded" : "trusted", checks[0]);
+    }
+
+    [Fact]
+    public async Task LaterParentSupersedesDescendantsEvenWithoutContents()
+    {
+        var leaf = Effect(folder: ["A", "Child"]);
+        var parent = Effect(folder: ["A"], name: "A", kind: "folder") with { ContentsTruncated = true };
+        Assert.Equal(["superseded", "trusted"], await Verify((Item("a"), leaf), (Item("b", "delete_folder"), parent)));
+        Assert.Equal(["trusted", "trusted"], await Verify((Item("a", "create_folder"), parent), (Item("b"), leaf)));
+    }
+
+    [Fact]
+    public async Task CopyOwnsOnlyResolvedDestination()
+    {
+        var first = Item("a", "copy_master_copy"); first.SourceLibraryName = "Source";
+        var second = Item("b", "copy_master_copy"); second.SourceLibraryName = "Source";
+        Assert.Equal(["trusted", "trusted"], await Verify((first, Effect()), (second, Effect(path: @"C:\Other\Fixture.al21"))));
+        second.SourceLibraryName = "AnotherSource";
+        Assert.Equal(["superseded", "trusted"], await Verify((first, Effect()), (second, Effect())));
+    }
+
+    [Theory]
+    [InlineData("same", true)]
+    [InlineData("case", true)]
+    [InlineData("plc", false)]
+    [InlineData("kind", false)]
+    [InlineData("folder", false)]
+    [InlineData("parent", false)]
+    [InlineData("child", false)]
+    [InlineData("device-alias", false)]
+    public async Task InstantiateOwnsOnlyRequestedPlcDestinationContainer(string scenario, bool superseded)
+    {
+        var first = Instantiate("a");
+        var second = Instantiate("b");
+        second.LibraryName = "DifferentSource"; second.Name = "DifferentMasterCopy";
+        if (scenario == "case") { second.PlcName = "PLC"; second.PlcFolderPath = ["GROUP"]; }
+        if (scenario == "plc") second.PlcName = "Other";
+        if (scenario == "kind") second.PlcKind = "typeGroup";
+        if (scenario == "folder") second.PlcFolderPath = ["Other"];
+        if (scenario == "parent") second.PlcFolderPath = [];
+        if (scenario == "child") second.PlcFolderPath = ["Group", "Child"];
+        if (scenario == "device-alias") second.PlcName = "OwningDevice";
+        var checks = await Verify((first, Effect()), (second, Effect(path: @"C:\Other\Source.al21")));
+        Assert.Equal(superseded ? "superseded" : "trusted", checks[0]);
+        Assert.Equal(["trusted", "trusted"], await Verify((first, Effect()), (Item("b", "close_global"), Effect())));
+    }
+
+    [Fact]
+    public async Task UnknownIdentitiesNeverCollideAndOpenUsesActualFilePath()
+    {
+        var empty = new LibraryWriteEffect(null, null, null, [], false);
+        Assert.Equal(["trusted", "trusted"], await Verify((Item("a", "create_global"), empty), (Item("b", "retrieve_global"), empty)));
+        var open = Item("a", "open_global"); open.FilePath = @"c:\Libraries\sub\..\Fixture.al21";
+        var archive = Item("b", "archive_global"); archive.Directory = @"C:\Other"; archive.Name = "Other";
+        Assert.Equal(["superseded", "trusted"], await Verify((open, empty), (archive, Effect())));
+        var pathless = Effect(path: null);
+        Assert.Equal(["trusted", "trusted"], await Verify((Item("a"), pathless), (Item("b"), pathless)));
+    }
+
+    [Theory]
+    [InlineData("worker_operation_failed", false, "superseded")]
+    [InlineData("target_not_found", false, "trusted")]
+    [InlineData("target_not_found", true, "superseded")]
+    public async Task FailedAttemptSupersedesOnlyWhenMutationIsPossible(string category, bool receipt, string check)
+    {
+        var items = new[] { Item("a"), Item("b") };
+        var result = WorkerCallResult.Fail(category, "failed") with { LibraryWriteOutcome = receipt ? new() { ActualName = "Copy" } : null };
+        var verification = await new TrustedWriteVerifier<LibraryWriteItem>(items,
+            new LibraryVerificationPolicy(items.ToDictionary(i => i.OperationId, _ => Effect())))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(items[0]), LibraryWritePayloadContract.Project(items[1], result)]));
+        Assert.Equal(check, Assert.Single(verification.Operations).Check);
+        Assert.True(verification.Success);
+    }
+
+    [Theory]
+    [InlineData("delete_master_copy")]
+    [InlineData("instantiate_master_copy")]
+    public async Task FailedAttemptRecoveryGuidanceDistinguishesLibraryObjectsAndPlcDestinations(string operation)
+    {
+        var items = operation == "instantiate_master_copy"
+            ? new[] { Instantiate("a"), Instantiate("b") }
+            : new[] { Item("a"), Item("b") };
+        var verification = await new TrustedWriteVerifier<LibraryWriteItem>(items,
+            new LibraryVerificationPolicy(items.ToDictionary(i => i.OperationId, _ => Effect())))
+            .VerifyAsync(StructuredOperationBatch.FromItems([Succeeded(items[0]),
+                LibraryWritePayloadContract.Project(items[1], WorkerCallResult.Fail("worker_operation_failed", "failed"))]));
+
+        var superseded = Assert.Single(verification.Operations);
+        Assert.Equal("superseded", superseded.Check);
+        Assert.Contains("library_read for library objects", superseded.Message);
+        Assert.Contains("plc_read for PLC destinations", superseded.Message);
+        Assert.Contains("final state is not verified", superseded.Message);
+        Assert.True(verification.Success);
+    }
+
+    [Fact]
+    public async Task PolicyNeverReadsBack()
+    {
+        var policy = new LibraryVerificationPolicy(new Dictionary<string, LibraryWriteEffect>());
+        Assert.False(policy.HasReadBack(Item("a")));
+        await Assert.ThrowsAsync<NotSupportedException>(() => policy.ReadBackAsync(Item("a"), null));
+    }
+
+    private static LibraryWriteItem Instantiate(string id) => new()
+        { OperationId = id, Operation = "instantiate_master_copy", PlcName = "Plc", PlcKind = "blockGroup", PlcFolderPath = ["Group"] };
+    private static LibraryWriteItem Item(string id, string operation = "delete_master_copy") => new()
+        { OperationId = id, Operation = operation, Scope = "global", Name = "Copy" };
+    private static LibraryWriteEffect Effect(string? path = @"C:\Libraries\Fixture.al21", string scope = "global",
+        string[]? folder = null, string name = "Copy", string kind = "masterCopy", string folderKind = "masterCopies")
+        => new(new() { Scope = scope, LibraryPath = path, LibraryName = "Fixture", Kind = "library", Name = "Fixture" },
+            new() { Scope = scope, LibraryPath = path, LibraryName = "Fixture", FolderPath = folder?.ToList() ?? [], FolderKind = folderKind, Kind = kind, Name = name },
+            null, [], false);
+    private static StructuredOperationItem Succeeded(LibraryWriteItem item)
+        => new(item.OperationId, item.Operation, "succeeded", null, null, null, null, []);
+    private static async Task<string[]> Verify(params (LibraryWriteItem Item, LibraryWriteEffect Effect)[] steps)
+    {
+        var items = steps.Select(s => s.Item).ToArray();
+        var verification = await new TrustedWriteVerifier<LibraryWriteItem>(items,
+            new LibraryVerificationPolicy(steps.ToDictionary(s => s.Item.OperationId, s => s.Effect)))
+            .VerifyAsync(StructuredOperationBatch.FromItems(items.Select(Succeeded).ToArray()));
+        Assert.True(verification.Success);
+        return verification.Operations.Select(v => v.Check).ToArray();
+    }
+}

@@ -1,0 +1,222 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using TiaMcpServer.Cli;
+using TiaMcpServer.Cli.Install;
+using TiaMcpServer.Cursors;
+using TiaMcpServer.Hmi;
+using TiaMcpServer.Network;
+using TiaMcpServer.OperationBatches;
+using TiaMcpServer.ProjectTree;
+using TiaMcpServer.Safety;
+using TiaMcpServer.Safety.Pipeline;
+using TiaMcpServer.Tools;
+using TiaMcpServer.Worker;
+using TiaMcpServer.Contracts.Project;
+using TiaMcpServer.Contracts.Safety;
+
+namespace TiaMcpServer
+{
+    internal static class Program
+    {
+        private static async Task<int> Main(string[] args)
+        {
+            if (args.Length > 0 && string.Equals(args[0], "install", StringComparison.OrdinalIgnoreCase))
+            {
+                return await InstallCommand.RunAsync(args[1..]);
+            }
+
+            if (args.Length > 0 && string.Equals(args[0], "doctor", StringComparison.OrdinalIgnoreCase))
+            {
+                return await DoctorCommand.RunAsync(args[1..]);
+            }
+
+            if (args.Length > 0 && (string.Equals(args[0], "--version", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(args[0], "-v", StringComparison.OrdinalIgnoreCase)))
+            {
+                return VersionCommand.Run(Console.Out);
+            }
+
+            if (RemovedCliOptions.TryGetError(args, out var removedOptionError))
+            {
+                Console.Error.WriteLine($"Error: {removedOptionError}");
+                return 1;
+            }
+
+            var accessModeResult = AccessModeParser.Parse(args);
+            if (!accessModeResult.IsValid)
+            {
+                Console.Error.WriteLine($"Error: {accessModeResult.Error}");
+                return 1;
+            }
+
+            var accessMode = accessModeResult.Mode;
+            var accessPolicy = new OperationAccessPolicy(accessMode);
+            if (!TryResolveStartupProjectPath(args, out var startupProjectPath, out var projectPathError))
+            {
+                Console.Error.WriteLine($"Error: {projectPathError}");
+                return 1;
+            }
+
+            var budgetResult = PayloadBudgetParser.Parse(args);
+            if (!budgetResult.IsValid)
+            {
+                Console.Error.WriteLine($"Error: {budgetResult.Error}");
+                return 1;
+            }
+
+            StructuredOperationBatchPayloadBudget.Configure(budgetResult.ItemChars, budgetResult.DocumentChars);
+
+            var workerTimeout = WorkerTimeoutParser.Parse(args);
+            if (!workerTimeout.IsValid)
+            {
+                Console.Error.WriteLine($"Error: {workerTimeout.Error}");
+                return 1;
+            }
+
+            Console.Error.WriteLine($"TIA MCP access mode: {McpAccessModeNames.ToName(accessMode).ToUpperInvariant()} ({AccessModeParseResult.SourceName(accessModeResult.Source)})");
+            if (accessModeResult.Source == AccessModeSource.Default)
+            {
+                Console.Error.WriteLine("No access mode was given. Use --access-mode read-write or --access-mode full (or TIA_MCP_ACCESS_MODE) to enable edits, compilation and lifecycle.");
+            }
+            Console.Error.WriteLine($"TIA MCP response budget: {budgetResult.ItemChars} characters per value, {budgetResult.DocumentChars} per response");
+            Console.Error.WriteLine($"TIA MCP worker timeout: {workerTimeout.Minutes} minutes");
+            if (accessMode == McpAccessMode.ReadOnly)
+            {
+                Console.Error.WriteLine("Project opening, compilation, writes and lifecycle operations are disabled.");
+            }
+
+            // Application-specific access-mode switches have been parsed. Remove them
+            // before generic-host configuration processes the remaining command line because
+            // value-less switches such as --read-only are not valid configuration key/value pairs.
+            var builder = Host.CreateApplicationBuilder(
+                HostArgumentFilter.RemoveAccessModeArguments(args));
+            builder.Logging.AddConsole(opts => opts.LogToStandardErrorThreshold = LogLevel.Trace);
+            builder.Services.AddSingleton(new ProjectSessionBinding(startupProjectPath));
+            builder.Services.AddSingleton(accessPolicy);
+            builder.Services.AddSingleton(new Vci.VciBreadcrumbLocation());
+            builder.Services.AddSingleton(sp => new OpennessWorkerClient(
+                sp.GetRequiredService<ProjectSessionBinding>(),
+                sp.GetRequiredService<ILogger<OpennessWorkerClient>>(),
+                requestTimeout: workerTimeout.Timeout,
+                accessPolicy: sp.GetRequiredService<OperationAccessPolicy>()));
+            builder.Services.AddSingleton(sp => new WriteExecution(
+                new OpennessWriteBindingGate(sp.GetRequiredService<OpennessWorkerClient>()),
+                new JsonlWriteAuditSink(), WriteGuardRegistration.ProductionCatalog(), TimeProvider.System));
+            builder.Services.AddSingleton(_ => AuthenticatedCursorProtector.CreateProcessScoped());
+            builder.Services.AddSingleton(sp => new HardwarePageCursorCodec(
+                sp.GetRequiredService<AuthenticatedCursorProtector>()));
+            builder.Services.AddSingleton(sp => new NetworkObjectPageCursorCodec(
+                sp.GetRequiredService<AuthenticatedCursorProtector>()));
+            builder.Services.AddSingleton(sp => new NetworkObjectPaginationCoordinator(
+                sp.GetRequiredService<OpennessWorkerClient>(),
+                sp.GetRequiredService<NetworkObjectPageCursorCodec>()));
+            builder.Services.AddSingleton(sp => new HardwarePageProjector(
+                sp.GetRequiredService<HardwarePageCursorCodec>()));
+            builder.Services.AddSingleton(sp => new HardwarePaginationCoordinator(
+                sp.GetRequiredService<OpennessWorkerClient>(),
+                sp.GetRequiredService<HardwarePageCursorCodec>(),
+                sp.GetRequiredService<HardwarePageProjector>()));
+            builder.Services.AddSingleton(sp => new ProjectTreeCursorCodec(
+                sp.GetRequiredService<AuthenticatedCursorProtector>()));
+            builder.Services.AddSingleton(sp => new HmiPageCursorCodec(
+                sp.GetRequiredService<AuthenticatedCursorProtector>()));
+            builder.Services.AddSingleton(sp => new TiaMcpServer.Library.LibraryPageCursorCodec(
+                sp.GetRequiredService<AuthenticatedCursorProtector>()));
+            builder.Services.AddSingleton(sp => new ProjectTreeSnapshotStore(TimeProvider.System));
+            builder.Services.AddSingleton(sp => new ProjectTreePageProjector(
+                sp.GetRequiredService<ProjectTreeCursorCodec>()));
+            builder.Services.AddSingleton(sp => new ProjectTreeBrowseCoordinator(
+                sp.GetRequiredService<OpennessWorkerClient>(),
+                sp.GetRequiredService<ProjectTreeCursorCodec>(),
+                sp.GetRequiredService<ProjectTreeSnapshotStore>(),
+                sp.GetRequiredService<ProjectTreePageProjector>(),
+                TimeProvider.System));
+            builder.Services.AddSingleton(sp => new NetworkReadOperationExecutor(
+                sp.GetRequiredService<OpennessWorkerClient>(),
+                sp.GetRequiredService<HardwarePaginationCoordinator>(),
+                sp.GetRequiredService<NetworkObjectPaginationCoordinator>()));
+
+            builder.Services
+                .AddMcpServer()
+                .WithStdioServerTransport()
+                .WithAccessModeTools(accessMode);
+
+            using var host = builder.Build();
+            await host.RunAsync();
+            return 0;
+        }
+
+        private static bool TryResolveStartupProjectPath(
+            string[] args,
+            out string? projectPath,
+            out string? error)
+        {
+            projectPath = null;
+            error = null;
+            var source = "--project";
+            for (int i = 0; i < args.Length; i++)
+            {
+                string? candidate = null;
+                if (string.Equals(args[i], "--project", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 >= args.Length ||
+                        string.IsNullOrWhiteSpace(args[i + 1]) ||
+                        args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                    {
+                        error = "--project requires a value.";
+                        return false;
+                    }
+
+                    candidate = args[++i];
+                }
+                else
+                {
+                    const string projectPrefix = "--project=";
+                    if (args[i].StartsWith(projectPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        candidate = args[i].Substring(projectPrefix.Length);
+                        if (string.IsNullOrWhiteSpace(candidate))
+                        {
+                            error = "--project requires a value.";
+                            return false;
+                        }
+                    }
+                }
+
+                if (candidate is null)
+                {
+                    continue;
+                }
+
+                if (projectPath is not null)
+                {
+                    error = "--project may be specified only once.";
+                    return false;
+                }
+
+                projectPath = candidate;
+            }
+
+            if (projectPath is null)
+            {
+                source = ConfiguredProjectPath.EnvVar;
+                projectPath = Environment.GetEnvironmentVariable(ConfiguredProjectPath.EnvVar);
+                if (string.IsNullOrWhiteSpace(projectPath))
+                {
+                    projectPath = null;
+                    return true;
+                }
+            }
+
+            var invalid = ConfiguredProjectPath.Validate(projectPath.Trim());
+            if (invalid is not null)
+            {
+                error = $"{source} {invalid} Got '{projectPath}'.";
+                return false;
+            }
+
+            return true;
+        }
+    }
+}

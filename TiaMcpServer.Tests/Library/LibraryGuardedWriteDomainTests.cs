@@ -1,0 +1,330 @@
+using System.Reflection;
+using System.Text.Json;
+using TiaMcpServer.Contracts.Json;
+using TiaMcpServer.Contracts.Library;
+using TiaMcpServer.Contracts.Project;
+using TiaMcpServer.Contracts.Safety;
+using TiaMcpServer.Contracts.Worker;
+using TiaMcpServer.Library;
+using TiaMcpServer.OperationBatches;
+using TiaMcpServer.Safety;
+using TiaMcpServer.Safety.Pipeline;
+using TiaMcpServer.Tests.Safety.Pipeline;
+using TiaMcpServer.Worker;
+using Xunit;
+
+namespace TiaMcpServer.Tests.Library;
+
+public sealed class LibraryGuardedWriteDomainTests
+{
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, true)]
+    public async Task MetadataCalls_KeepStagingRules(bool preview, bool readWrite, bool lifecycle)
+    {
+        using var fixture = await Fixture.Create();
+        var library = new LibraryIdentityInfo { Scope = "global", Kind = "library", LibraryName = "Fixture", LibraryPath = "C:/Fixture/First.al21" };
+        var languageChange = new LibraryMetadataChangeInfo { ActivatedLanguages = ["pl-PL"] };
+        var commentChange = new LibraryMetadataChangeInfo { Comments = [new() { Culture = "pl-PL", Before = null, After = "new" }] };
+        var items = new List<LibraryWriteItem>
+        {
+            new() { OperationId = "a", Operation = "set_languages", Scope = "global", LibraryName = "Fixture", ActivateLanguages = ["pl-PL"] },
+            new() { OperationId = "b", Operation = "set_comments", Scope = "global", LibraryName = "Fixture", Comments = [new() { Culture = "pl-PL", Text = "new" }] }
+        };
+        if (lifecycle) items.Add(new() { OperationId = "c", Operation = "save_global", Scope = "global", LibraryName = "Fixture" });
+        foreach (var item in items)
+        {
+            var change = item.Operation == "set_languages" ? languageChange : item.Operation == "set_comments" ? commentChange : null;
+            fixture.PutResponse(item.OperationId, new() { Success = true, Payload = WorkerJson.SerializePayload(new LibraryWritePlanInfo
+            {
+                Library = library, MetadataChange = change, MissingTargets = item.Operation == "set_comments"
+                    ? [new() { Scope = "global", Kind = "comment", LibraryPath = library.LibraryPath, Name = "pl-PL" }] : null
+            }) }, plan: true);
+            fixture.PutResponse(item.OperationId, new() { Success = true,
+                Payload = WorkerJson.SerializePayload(new LibraryWriteResultInfo { Library = library, MetadataChange = change }) });
+        }
+        var reply = await fixture.Run(items.ToArray(), dryRun: preview, readWrite: readWrite);
+        var root = reply.StructuredContent!.Value;
+        Assert.True(root.GetProperty("success").GetBoolean(), root.GetRawText());
+        var plans = fixture.LibraryRequests.Where(r => r.Method == LibraryWriteMethods.GlobalPlan).ToArray();
+        var mutations = fixture.LibraryRequests.Where(r => r.Method != LibraryWriteMethods.GlobalPlan).ToArray();
+        if (preview || lifecycle)
+        {
+            Assert.Equal(items.Count, plans.Select(r => r.LibraryWrite!.OperationId).Distinct().Count());
+            var effects = root.GetProperty("effects").EnumerateArray().ToArray();
+            Assert.Equal("pl-PL", effects[0].GetProperty("effect").GetProperty("metadataChange").GetProperty("activatedLanguages")[0].GetString());
+            Assert.Equal(1, effects[1].GetProperty("effect").GetProperty("createdByItem").GetInt32());
+        }
+        else Assert.Empty(plans);
+        Assert.Equal(preview ? 0 : items.Count, mutations.Length);
+        Assert.Equal(lifecycle && readWrite && !preview ? 1 : 0, fixture.Prompts);
+        if (!preview)
+        {
+            Assert.Equal(new[] { "library_global_set_languages", "library_global_set_comments" }, mutations.Take(2).Select(r => r.Method));
+            Assert.Equal("pl-PL", root.GetProperty("batch").GetProperty("operations")[0].GetProperty("result")
+                .GetProperty("metadataChange").GetProperty("activatedLanguages")[0].GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData("create_global")]
+    [InlineData("open_global")]
+    [InlineData("retrieve_global")]
+    public async Task MetadataCalls_PlannedLifecycleCannotSupplyAnUnopenedLibrary(string operation)
+    {
+        using var fixture = await Fixture.Create();
+        var first = new LibraryWriteItem { OperationId = "a", Operation = operation, Directory = "C:/Fixture", Name = operation == "create_global" ? "New" : null,
+            FilePath = operation == "open_global" ? "C:/Fixture/New.al21" : operation == "retrieve_global" ? "C:/Fixture/New.zal21" : null,
+            OpenMode = operation == "create_global" ? null : "readWrite" };
+        var second = new LibraryWriteItem { OperationId = "b", Operation = "set_comments", Scope = "global", LibraryName = "New",
+            Comments = [new() { Culture = "en-US", Text = "new" }] };
+        if (operation == "open_global") first.Directory = null;
+        fixture.PutResponse("a", new() { Success = true, Payload = WorkerJson.SerializePayload(new LibraryWritePlanInfo()) }, plan: true);
+        fixture.PutResponse("b", new() { Success = false, FailureCategory = "target_not_found", Error = "Library is not open." }, plan: true);
+        var reply = await fixture.Run([first, second], readWrite: true);
+        Assert.Equal("target_not_found", reply.StructuredContent!.Value.GetProperty("error").GetProperty("category").GetString());
+        Assert.Equal(new[] { "library_global_plan", "library_global_plan" }, fixture.LibraryRequests.Select(r => r.Method));
+        Assert.Equal(0, fixture.Prompts);
+    }
+
+    [Fact]
+    public async Task MetadataFailure_PreservesResolvedIdentityInsteadOfSelectorAlias()
+    {
+        using var fixture = await Fixture.Create();
+        var first = new LibraryWriteItem { OperationId = "a", Operation = "set_comments", Scope = "global", LibraryName = "Fixture",
+            Comments = [new() { Culture = "pl-PL", Text = "new" }] };
+        var later = new LibraryWriteItem { OperationId = "b", Operation = "set_languages", Scope = "global", LibraryName = "Fixture", ActivateLanguages = ["pl-PL"] };
+        fixture.PutResponse("a", new() { Success = true, Payload = WorkerJson.SerializePayload(new LibraryWriteResultInfo
+        {
+            Library = new() { Scope = "global", Kind = "library", LibraryName = "Fixture", LibraryPath = "C:/Fixture/First.al21" },
+            MetadataChange = new() { Comments = [new() { Culture = "pl-PL", Before = "old", After = "new" }] }
+        }) });
+        fixture.PutResponse("b", new() { Success = false, FailureCategory = "worker_operation_failed", Error = "failed after resolution",
+            LibraryWriteOutcome = new() { Library = new() { Scope = "global", Kind = "library", LibraryName = "Fixture", LibraryPath = "C:/Other/Second.al21" },
+                MetadataChange = new() { ActivatedLanguages = [] } } });
+        var reply = await fixture.Run([first, later]);
+        var root = reply.StructuredContent!.Value;
+        Assert.False(root.GetProperty("success").GetBoolean(), root.GetRawText());
+        Assert.Equal("trusted", Assert.Single(root.GetProperty("verification").GetProperty("operations").EnumerateArray()).GetProperty("check").GetString());
+        Assert.Equal("C:/Other/Second.al21", root.GetProperty("batch").GetProperty("operations")[1].GetProperty("result").GetProperty("library").GetProperty("libraryPath").GetString());
+    }
+
+    [Fact]
+    public async Task Apply_LaterItemUsesTypeCreatedByEarlierItem()
+    {
+        using var fixture = await Fixture.Create();
+        var reply = await fixture.Run([
+            new() { OperationId = "a", Operation = "create_type", PlcName = "PLC", PlcKind = "block", PlcObjectName = "Motor" },
+            new() { OperationId = "b", Operation = "release_type_version", Scope = "project", TypeName = "Motor" }]);
+        var root = reply.StructuredContent!.Value;
+        Assert.True(root.GetProperty("success").GetBoolean(), root.GetRawText());
+        Assert.Empty(root.GetProperty("effects").EnumerateArray());
+        Assert.Equal(new[] { "library_project_create_type", "library_project_release_type_version" }, fixture.LibraryRequests.Select(r => r.Method));
+        Assert.Equal(new[] { "superseded", "trusted" }, root.GetProperty("verification").GetProperty("operations").EnumerateArray().Select(x => x.GetProperty("check").GetString()));
+    }
+    [Fact]
+    public async Task Domain_Apply_SkipsPlanning()
+    {
+        using var fixture = await Fixture.Create();
+        var reply = await fixture.Run([Item("a")]);
+        Assert.True(reply.StructuredContent!.Value.GetProperty("success").GetBoolean());
+        Assert.Empty(reply.StructuredContent.Value.GetProperty("effects").EnumerateArray());
+        Assert.Equal("library_global_delete_master_copy", Assert.Single(fixture.LibraryRequests).Method);
+    }
+
+    [Fact]
+    public void ConfirmsCall_TrueOnlyWithLifecycleItem()
+    {
+        using var client = new OpennessWorkerClient(new(null));
+        var domain = new LibraryWriteDomain(client);
+        foreach (var operation in LibraryWriteMethods.Operations)
+            Assert.Equal(LibraryWriteMethods.LifecycleOperations.Contains(operation), domain.ConfirmsCall([Item("a", operation)]));
+        Assert.False(domain.ConfirmsCall([]));
+        Assert.True(domain.ConfirmsCall([Item("a"), Item("b", "save_global")]));
+        var description = domain.DescribeForConfirmation([Item("a"), Item("b", "save_global")], []);
+        Assert.Contains("save_global", description);
+        Assert.Contains("Fixture", description);
+        Assert.Equal("access_denied", domain.Validate([Item("a")], McpAccessMode.ReadOnly).Error!.Category);
+        Assert.False(domain.VerificationSucceeded(null));
+    }
+
+    [Fact]
+    public async Task CapabilityOperations_ProjectItemOnLocalSession_RefusedBeforeAnyMutation()
+    {
+        using var client = new OpennessWorkerClient(new(null));
+        var global = Item("a");
+        var project = Item("b"); project.Scope = "project"; project.LibraryName = null;
+        var domain = new LibraryWriteDomain(client);
+        Assert.Equal(new[] { "library_global_delete_master_copy", "library_project_delete_master_copy" }, domain.CapabilityOperations([global, project]));
+        var gate = new FakeWriteBindingGate { AccessMode = McpAccessMode.Full,
+            CurrentBinding = new(ProjectBindingSnapshot.VerifiedState, "binding", 1, "C:/Fixture/Local.amc21", "worker", 1, 42, null,
+                new() { ContainerKind = ProjectContainerKinds.LocalSession }) };
+        var execution = new WriteExecution(gate, new RecordingAuditSink(gate), new(LibraryGuardDefinitions.Definitions), TimeProvider.System);
+        var reply = await execution.RunAsync(domain, new WriteCall<LibraryWriteItem>([global, project], false));
+        Assert.Equal("unsupported_capability", reply.StructuredContent!.Value.GetProperty("error").GetProperty("category").GetString());
+        Assert.Equal(0, gate.LeaseCalls);
+        Assert.Null(typeof(OpennessWorkerClient).GetField("_transport", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(client));
+    }
+
+    [Theory]
+    [InlineData("create_global", "C:/Fixture/Output", "NewLibrary")]
+    [InlineData("open_global", "C:/Fixture/Input.al21", "readWrite")]
+    [InlineData("retrieve_global", "C:/Fixture/Input.al21", "C:/Fixture/Output")]
+    [InlineData("save_global", "Fixture", "save_global")]
+    [InlineData("close_global", "Fixture", "discard")]
+    [InlineData("archive_global", "Fixture", "C:/Fixture/Output")]
+    public void ConfirmationDescription_NamesOperationAndRequestedTargets(string operation, string first, string second)
+    {
+        using var client = new OpennessWorkerClient(new(null));
+        var item = Item("a", operation);
+        item.Directory = "C:/Fixture/Output"; item.FilePath = "C:/Fixture/Input.al21";
+        item.Name = "NewLibrary"; item.OpenMode = "readWrite"; item.CloseAction = "discard";
+        var message = new LibraryWriteDomain(client).DescribeForConfirmation([item], []);
+        Assert.Contains(operation, message);
+        Assert.Contains(first, message);
+        Assert.Contains(second, message);
+        if (operation == "archive_global") Assert.Contains("NewLibrary", message);
+    }
+
+    [Fact]
+    public async Task DryRun_PlansWithoutMutation()
+    {
+        using var fixture = await Fixture.Create();
+        var reply = await fixture.Run([Item("a"), Item("b")], dryRun: true);
+        var root = reply.StructuredContent!.Value;
+        Assert.True(root.GetProperty("success").GetBoolean(), root.GetRawText());
+        Assert.Equal("preview", root.GetProperty("phase").GetString());
+        Assert.Equal(2, root.GetProperty("effects").GetArrayLength());
+        Assert.Equal(new[] { "library_global_plan", "library_global_plan" }, fixture.LibraryRequests.Select(r => r.Method));
+    }
+
+    [Fact]
+    public async Task StopsAtFirstFailure_NoLaterMutation()
+    {
+        using var fixture = await Fixture.Create();
+        var reply = await fixture.Run([Item("a"), Item("b"), Item("c")]);
+        var root = reply.StructuredContent!.Value;
+        Assert.False(root.GetProperty("success").GetBoolean());
+        Assert.False(reply.IsError);
+        Assert.Equal(new[] { "succeeded", "failed", "skipped" }, root.GetProperty("batch").GetProperty("operations").EnumerateArray().Select(o => o.GetProperty("status").GetString()));
+        Assert.Equal(new[] { "a", "b" }, fixture.LibraryRequests.Where(r => r.Method != LibraryWriteMethods.GlobalPlan).Select(r => r.LibraryWrite!.OperationId));
+        Assert.Equal("superseded", Assert.Single(root.GetProperty("verification").GetProperty("operations").EnumerateArray()).GetProperty("check").GetString());
+    }
+
+    [Fact]
+    public async Task Verification_UsesMutationIdentityRatherThanPlannedIdentity()
+    {
+        using var fixture = await Fixture.Create();
+        var items = new[] { Item("a"), Item("b") };
+        var domain = new LibraryWriteDomain(fixture.Client);
+        Assert.True((await domain.PlanAsync(items)).Success);
+        fixture.PutPlan("C:/Fixture/First.al21", "C:/Fixture/Second.al21");
+        Assert.True((await domain.PlanAsync(items)).Success);
+        var success = domain.Project(items[0], await domain.MutateAsync(items[0]));
+        var batch = StructuredOperationBatch.FromItems([success, StructuredOperationItem.Failed(items[1], "worker_operation_failed", "not attempted", [])]);
+        await domain.MutateAsync(items[1]);
+        Assert.Equal("superseded", Assert.Single((await domain.VerifyAsync(batch))!.Operations).Check);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => domain.ReplanAsync(items[0]));
+    }
+
+    [Fact]
+    public async Task Verification_IgnoresUnattemptedFailuresOnTheSameObject()
+    {
+        using var fixture = await Fixture.Create();
+        var items = new[] { Item("a"), Item("b") };
+        var domain = new LibraryWriteDomain(fixture.Client);
+        Assert.True((await domain.PlanAsync(items)).Success);
+        await domain.MutateAsync(items[0]);
+        var success = domain.Project(items[0], WorkerCallResult.Ok(WorkerJson.SerializePayload(new LibraryWriteResultInfo())));
+        var batch = StructuredOperationBatch.FromItems([success,
+            StructuredOperationItem.Failed(items[1], "worker_operation_failed", "not attempted", [])]);
+        Assert.Equal("trusted", Assert.Single((await domain.VerifyAsync(batch))!.Operations).Check);
+    }
+
+    private static LibraryWriteItem Item(string id, string operation = "delete_master_copy")
+        => new() { OperationId = id, Operation = operation, Scope = "global", LibraryName = "Fixture", Name = "Copy" };
+
+    // Script only the external peer: planning, dispatch, stop semantics and verification stay real.
+    internal sealed class Fixture : IDisposable
+    {
+        private readonly string directory = Path.Combine(Path.GetTempPath(), "library-domain-" + Guid.NewGuid().ToString("N"));
+        private readonly WorkerSessionIdentity identity;
+        public OpennessWorkerClient Client { get; }
+        public int Prompts { get; private set; }
+        public WorkerRequest[] LibraryRequests => File.ReadAllLines(Path.Combine(directory, "requests"))
+            .Select(l => JsonSerializer.Deserialize<WorkerRequest>(l, WorkerJson.Request)!).Where(r => r.Method.StartsWith("library_", StringComparison.Ordinal)).ToArray();
+        private Fixture()
+        {
+            Directory.CreateDirectory(directory);
+            identity = new() { WorkerSessionId = "domain", SessionGeneration = 1, PortalProcessId = 4242, ProjectPath = Path.Combine(directory, "fixture.ap21") };
+            var binding = new ProjectSessionBinding(null);
+            Assert.True(binding.BindVerified(identity, false, out _));
+            Client = new(binding, accessPolicy: new OperationAccessPolicy(McpAccessMode.ReadWrite));
+            File.WriteAllText(Path.Combine(directory, "worker.ps1"), """
+                param([string]$Root)
+                while (($line = [Console]::In.ReadLine()) -ne $null) {
+                    $r = $line | ConvertFrom-Json
+                    [IO.File]::AppendAllText((Join-Path $Root 'requests'), $line + [Environment]::NewLine)
+                    $file = if ($r.method -eq 'hello') { 'hello' } elseif ($r.method -eq 'library_global_plan') { if ($r.libraryWrite.operationId -eq 'b') { 'plan-b' } else { 'plan' } } elseif ($r.method -eq 'library_global_delete_master_copy') { if ($r.libraryWrite.operationId -eq 'b') { 'failure' } else { 'mutation' } } else { 'status' }
+                    if ($r.method -eq 'library_project_create_type') { $typeCreated = $true; $file = 'type-result' }
+                    if ($r.method -eq 'library_project_release_type_version') { $file = if ($typeCreated) { 'type-result' } else { 'missing-type' } }
+                    $recorded = if ($r.method -in @('library_global_plan','library_project_plan')) { 'recorded-plan-' + $r.libraryWrite.operationId } else { 'recorded-mutation-' + $r.libraryWrite.operationId }
+                    if (Test-Path (Join-Path $Root $recorded)) { $file = $recorded }
+                    [Console]::Out.WriteLine([IO.File]::ReadAllText((Join-Path $Root $file))); [Console]::Out.Flush()
+                }
+                """);
+            Save("hello", new() { Success = true, ProtocolVersion = WorkerProtocol.Version, Capabilities = WorkerProtocol.RequiredCapabilities.ToList() });
+            Save("status", Response("{}"));
+            Save("type-result", Response(WorkerJson.SerializePayload(new LibraryWriteResultInfo {
+                Library = new() { Scope = "project", Kind = "library" },
+                Type = new() { TypeName = "Motor", TypeGuid = Guid.NewGuid().ToString("D"), VersionGuid = Guid.NewGuid().ToString("D") } })));
+            Save("missing-type", new() { Success = false, FailureCategory = "target_not_found", Error = "type has not been created",
+                SessionIdentity = identity, ResolvedProjectPath = identity.ProjectPath });
+            Save("mutation", Response(WorkerJson.SerializePayload(new LibraryWriteResultInfo {
+                Library = new() { Scope = "global", Kind = "library", LibraryPath = "C:/Fixture/First.al21", Name = "Fixture" },
+                Target = new() { Scope = "global", Kind = "masterCopy", FolderKind = "masterCopies", Name = "Copy" } })));
+            Save("failure", new() { Success = false, FailureCategory = "worker_operation_failed", Error = "fixture rejection", SessionIdentity = identity, ResolvedProjectPath = identity.ProjectPath });
+            PutPlan("C:/Fixture/First.al21");
+            var transport = new PersistentWorkerTransport(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+                TimeSpan.FromSeconds(15), workerArgs: $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{Path.Combine(directory, "worker.ps1")}\" -Root \"{directory}\"");
+            typeof(OpennessWorkerClient).GetField("_transport", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(Client, transport);
+        }
+        public static async Task<Fixture> Create()
+        {
+            var fixture = new Fixture(); Assert.True((await fixture.Client.GetProjectStatusAsync(null)).Success); return fixture;
+        }
+        public void PutPlan(string path, string? secondPath = null)
+        {
+            Save("plan", Plan(path));
+            Save("plan-b", Plan(secondPath ?? path));
+        }
+        private WorkerResponse Plan(string path) => Response(WorkerJson.SerializePayload(new LibraryWritePlanInfo
+        {
+            Library = new() { Scope = "global", Kind = "library", LibraryPath = path, Name = "Fixture" },
+            Target = new() { Scope = "global", Kind = "masterCopy", FolderKind = "masterCopies", Name = "Copy" }
+        }));
+        public void PutResponse(string id, WorkerResponse response, bool plan = false)
+        {
+            response.SessionIdentity = identity;
+            response.ResolvedProjectPath = identity.ProjectPath;
+            Save("recorded-" + (plan ? "plan-" : "mutation-") + id, response);
+        }
+        public Task<ModelContextProtocol.Protocol.CallToolResult> Run(LibraryWriteItem[] items, bool dryRun = false, bool readWrite = false)
+        {
+            var gate = new FakeWriteBindingGate { AccessMode = readWrite ? McpAccessMode.ReadWrite : McpAccessMode.Full, CurrentBinding = Client.BindingSnapshot };
+            var confirmation = new UserConfirmation(true, (_, _) =>
+            {
+                Prompts++;
+                return ValueTask.FromResult(new ModelContextProtocol.Protocol.ElicitResult { Action = "accept",
+                    Content = new Dictionary<string, JsonElement> { ["confirm"] = JsonSerializer.SerializeToElement(true) } });
+            }, TimeSpan.FromSeconds(5));
+            return new WriteExecution(gate, new RecordingAuditSink(gate), new(LibraryGuardDefinitions.Definitions), TimeProvider.System)
+                .RunAsync(new LibraryWriteDomain(Client), new WriteCall<LibraryWriteItem>(items, dryRun), new(confirmation));
+        }
+        private WorkerResponse Response(string payload) => new() { Success = true, Payload = payload, SessionIdentity = identity, ResolvedProjectPath = identity.ProjectPath };
+        private void Save(string file, WorkerResponse value) => File.WriteAllText(Path.Combine(directory, file), JsonSerializer.Serialize(value, WorkerJson.Envelope));
+        public void Dispose() { Client.Dispose(); Directory.Delete(directory, true); }
+    }
+}
