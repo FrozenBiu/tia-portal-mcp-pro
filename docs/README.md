@@ -21,7 +21,7 @@ For the project overview, tool list, and quick start, see the [README](../README
 | --- | --- |
 | [Architecture](ARCHITECTURE.md) | Two-process topology, tier enforcement, explicit binding/cursor invalidation, transport, canonical JSON, mode-derived confirmation/audit v2, and testing |
 | [Network operations and paging matrix](SupportedOperations/NETWORK_OPERATIONS_SUMMARY.md#paging-matrix) | Cross-tool paging fields, defaults, bounds, scan/continuation semantics and per-domain recovery references |
-| [HMI operations (`hmi_read`, `hmi_write`)](SupportedOperations/HMI_OPERATIONS_SUMMARY.md) | The 20 read-only WinCC Unified operations and nine writes, read DTO additions, paging/completeness, guards, partial failures, verification and limits |
+| [HMI operations (`hmi_read`, `hmi_write`, `hmi_basic_studio`)](SupportedOperations/HMI_OPERATIONS_SUMMARY.md) | WinCC Unified reads/writes, Classic HMI graphics inventory and preview, paging/completeness, guards, partial failures, verification and limits |
 | [VCI operations (`vci_read`, `vci_write`)](SupportedOperations/VCI_OPERATIONS_SUMMARY.md) | Standalone workspace and mapping operations, formats, sync rules, path guards, recovery and evidence limits |
 | [Library operations (`library_read`, `library_write`)](SupportedOperations/LIBRARY_OPERATIONS_SUMMARY.md) | Global and project library reads and writes, selectors, snapshot-cursor paging, nullable flags, capability labels, binding rule and live-verified scope |
 | [Multiuser local sessions, inventory and acceptance boundary](SupportedOperations/MULTIUSER_OPERATIONS_SUMMARY.md) | Exact AMC adoption, ALS opening/basic status, persistent inventory, preservation guards and remaining session limits |

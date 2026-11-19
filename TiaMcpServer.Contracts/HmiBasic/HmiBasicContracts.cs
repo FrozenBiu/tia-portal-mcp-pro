@@ -36,6 +36,8 @@ public sealed class HmiBasicDevice
     public string Hmi { get; set; } = string.Empty;
     public HmiBasicTagTable[] TagTables { get; set; } = Array.Empty<HmiBasicTagTable>();
     public string[] Screens { get; set; } = Array.Empty<string>();
+    public string[] Graphics { get; set; } = Array.Empty<string>();
+    public string GraphicsCoverage { get; set; } = "unavailable";
 }
 
 public sealed class HmiBasicTagTable

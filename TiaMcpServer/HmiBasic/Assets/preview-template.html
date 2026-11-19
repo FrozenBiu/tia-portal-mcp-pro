@@ -9,6 +9,8 @@
     * { box-sizing: border-box; }
     body { margin: 0; padding: 20px; color: #17212b; background: #e8edf1; }
     h1 { margin: 0 0 14px; font-size: 18px; font-weight: 600; }
+    .graphic-warning { margin: 0 0 10px; color: #713f12; }
+    .graphic-summary { margin: 8px 0 0; color: #713f12; }
     .viewport { width: min(800px, 100%); aspect-ratio: 5 / 3; overflow: hidden; border: 1px solid #8493a0; background: #0f172a; box-shadow: 0 2px 8px #17212b33; }
     .viewport svg { display: block; width: 100%; height: 100%; }
     details { margin-top: 12px; }
@@ -18,6 +20,7 @@
 </head>
 <body>
   <h1>{{SCREEN_NAME}} <small>800 x 480</small></h1>
+  <p class="graphic-warning">{{GRAPHIC_WARNING}}</p>
   <main class="viewport" aria-label="800 by 480 HMI design preview">
     <svg viewBox="0 0 800 480" role="img" aria-label="WinCC Basic screen canvas">
       <rect width="800" height="480" fill="#0f172a" />
@@ -32,8 +35,10 @@
       <text x="400" y="419" text-anchor="middle" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">STOP</text>
       <rect x="544" y="376" width="232" height="72" rx="4" fill="#365c7d" />
       <text x="660" y="419" text-anchor="middle" fill="#ffffff" font-family="Tahoma, sans-serif" font-size="18" font-weight="bold">RESET</text>
+      {{GRAPHIC_PLACEHOLDER}}
     </svg>
   </main>
+  <p class="graphic-summary">{{GRAPHIC_SUMMARY}}</p>
   <details><summary>Screen SimaticML</summary><pre>{{SCREEN_XML}}</pre></details>
   <details><summary>Tag table SimaticML</summary><pre>{{TAG_XML}}</pre></details>
 </body>

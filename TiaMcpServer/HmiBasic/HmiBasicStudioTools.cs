@@ -29,7 +29,7 @@ public sealed class HmiBasicStudioTools
 
     [McpServerTool(Name = ToolName, ReadOnly = false, Destructive = true, OpenWorld = false,
         UseStructuredContent = true, OutputSchemaType = typeof(HmiBasicStudioResponse))]
-    [Description("WinCC Basic/Comfort/Advanced studio for a verified already-open standalone project. Actions: list (optional device), export (device, kind tag|screen, name, out absolute new XML file), design_and_preview (out absolute unused directory, spec or sourceScreen+sourceTags XML paths), import_and_compile (device, out preview directory, previewDigest, approved:true; optional replaceExisting). Design with device binds approval to the current verified project and resolved device/HMI; omit device for an offline preview that cannot be imported. Review preview.html before explicitly approving its digest and target. Approval is mandatory even in full mode. Import validates unchanged preview artifacts, imports tags then screen and compiles; failure may leave earlier stages applied. No implicit save, download or device control. Export refuses overwrite. Offline source previews never attach to TIA Portal.")]
+    [Description("WinCC Basic/Comfort/Advanced studio for a verified already-open standalone project. Actions: list (optional device; reports screens, tag tables, and names returned by the selected HMI GraphicsProvider without inferring project or global Toolbox provenance), export (device, kind tag|screen, name, out absolute new XML file), design_and_preview (out absolute unused directory, spec or sourceScreen+sourceTags XML paths; optional spec.graphic picture/objectName/x/y/width/height clones exactly one GraphicView from sourceScreen and requires a provider-observed picture name), import_and_compile (device, out preview directory, previewDigest, approved:true; optional replaceExisting). Graphic previews are labeled TIA graphic references, not rendered assets, and warn that the canvas is illustrative. Design with device binds approval to the current verified project and resolved device/HMI; omit device for an offline preview that cannot be imported. Review preview.html before explicitly approving its digest and target. Approval is mandatory even in full mode. Import validates unchanged preview artifacts, imports tags then screen and compiles; failure may leave earlier stages applied. No implicit save, download or device control. Export refuses overwrite. Offline source previews never attach to TIA Portal.")]
     public static async Task<CallToolResult> HmiBasicStudio(OpennessWorkerClient workerClient, WriteExecution execution,
         string action, string? device = null, string? kind = null, string? name = null, string? @out = null,
         JsonElement? spec = null, string? sourceScreen = null, string? sourceTags = null,
@@ -80,8 +80,13 @@ public sealed class HmiBasicStudioTools
                 var resolved = await ResolveDevice(workerClient, device!).ConfigureAwait(false);
                 if (resolved.Error is not null) return Failure(resolved.Error, action);
                 var identity = DestinationIdentity(workerClient.BindingSnapshot, resolved.Device!);
-                return Present(Empty(action) with { Success = true,
-                    Preview = HmiBasicDesigner.Design(RequiredOutput(@out), spec, sourceScreen, sourceTags, identity) });
+                if (spec is { ValueKind: JsonValueKind.Object } graphicSpec && graphicSpec.TryGetProperty("graphic", out _)
+                    && resolved.Device!.GraphicsCoverage != "provider")
+                    return Error(WorkerFailureCategories.TargetKindUnsupported,
+                        "Graphic placement requires graphics exposed by the selected HMI's Openness GraphicsProvider.", action);
+                var preview = HmiBasicDesigner.Design(RequiredOutput(@out), spec, sourceScreen, sourceTags, identity,
+                    resolved.Device!.Graphics);
+                return Present(Empty(action) with { Success = true, Warnings = preview.Warnings, Preview = preview });
             }, cancellationToken).ConfigureAwait(false);
             return pinned.Success ? pinned.Value! : Failure(pinned.Failure!, action);
         }
@@ -102,7 +107,9 @@ public sealed class HmiBasicStudioTools
         var value = CanonicalJson.DeserializeWorkerPayload<HmiBasicListResult>(payload);
         if (value.Devices is null || value.Devices.Any(d => d is null || string.IsNullOrWhiteSpace(d.Device)
             || string.IsNullOrWhiteSpace(d.Hmi) || d.Screens is null || d.Screens.Any(string.IsNullOrWhiteSpace)
-            || d.TagTables is null || d.TagTables.Any(t => t is null || string.IsNullOrWhiteSpace(t.Path) || t.Count < 0))) throw new JsonException();
+            || d.TagTables is null || d.TagTables.Any(t => t is null || string.IsNullOrWhiteSpace(t.Path) || t.Count < 0)
+            || d.Graphics is null || d.Graphics.Any(string.IsNullOrWhiteSpace)
+            || d.GraphicsCoverage is not ("provider" or "unavailable"))) throw new JsonException();
         return value;
     }
 

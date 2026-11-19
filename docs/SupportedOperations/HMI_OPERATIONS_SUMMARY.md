@@ -14,6 +14,26 @@ the [completion spec](https://github.com/Czarnak/tia-portal-mcp/blob/docs-archiv
 projects and bound local sessions. The [write acceptance report](../superpowers/acceptance/reports/2026-10-14-hmi-write-live-acceptance.md)
 qualifies the exact production source/package, launched side by side without global installation.
 
+## WinCC Basic / Comfort (`hmi_basic_studio`)
+
+The separate `hmi_basic_studio` tool targets Classic WinCC Basic/Comfort/Advanced HMIs. Its `list`
+action reports tag tables, screens, and `GraphicsProvider.Graphics` names with each selected HMI.
+It tries the HMI provider first and falls back to the standalone project provider when unavailable.
+The project fallback is shared across HMIs.
+`graphicsCoverage:"provider"` means only that the public Openness composition was read; it does not
+mean entries are project-local or that the global Toolbox catalog was enumerated. If Openness does not expose the graphics service,
+the result reports an empty graphics array and `graphicsCoverage:"unavailable"`.
+
+`design_and_preview` accepts optional `spec.graphic` with `picture`, `objectName`, `x`, `y`, `width`,
+and `height`. For a project-bound preview, the picture must match exactly one name in the selected
+HMI inventory and `sourceScreen` must contain exactly one valid `Hmi.Screen.GraphicView` node. The
+preview clones that node with new unique IDs, changes the clone's picture link and geometry, preserves
+the source node, and binds the result into the final screen XML, HTML and destination digest. The HTML
+shows a TIA graphic-reference placeholder and warns the fixed 800x480 canvas is illustrative; it does not export or render
+the graphic asset. `import_and_compile` remains the existing approved tag/screen import and compile
+flow; it does not import or replace graphic assets. No Siemens graphic files are bundled or read
+from installation directories.
+
 ## Operations
 
 Every operation except `list_hmi_devices` and `list_project_languages` takes an optional `hmiName`

@@ -21,8 +21,8 @@ The server exposes **9 tools** in `read-only` (the startup default), **22 tools*
 ### WinCC Basic / Comfort HMI Studio (`hmi_basic_studio`)
 
 - `hmi_basic_studio` - end-to-end engineering tool for classic WinCC Basic/Comfort HMI targets (`Siemens.Engineering.Hmi.dll`, e.g., KTP700 Basic `800x480`) available in `read-write` and `full` modes:
-  - **`list` / `export`**: Discover `HmiTarget` devices, tag tables, and screens in the bound project, or export existing items to SimaticML `.xml`.
-  - **`design_and_preview`**: Generate valid SimaticML tag tables (`Bool`, `Int`, `DInt`, `Real`, `String`) and screens (`Rectangle`, `TextField`, `IOField`, `Button` with `SetBit`/`ResetBit`/`InvertBit`, `RangeAppearanceAnimation`, `FlashingType=Medium`, `VisibilityAnimation`) from the bundled `templates/` library, verify sequential unique hex IDs and bounds, and render an interactive `preview.html` (`800x480` canvas with live tag/flashing simulation) **before** mutating TIA Portal.
+  - **`list` / `export`**: Discover `HmiTarget` devices, tag tables, screens, and provider-observed graphics (without inferring project or global Toolbox provenance), or export existing screens/tag tables to SimaticML `.xml`.
+  - **`design_and_preview`**: Generate valid SimaticML tag tables (`Bool`, `Int`, `DInt`, `Real`, `String`) and screens from the bundled `templates/` library; optionally add a `GraphicView` reference to a provider-observed graphic name and placement. The HTML uses a labeled placeholder, not Siemens media, and warns that its canvas is illustrative. Preview and approve its digest **before** importing.
   - **`import_and_compile`**: Verify artifact SHA-256 digests, import the approved tag table and screen XML into TIA Portal via Openness (`ImportOptions.Override`), and trigger HMI compilation diagnostics.
 
 ### WinCC Unified HMI reads and writes

@@ -7,6 +7,7 @@ using Siemens.Engineering.Compiler;
 using Siemens.Engineering.Hmi;
 using Siemens.Engineering.Hmi.Screen;
 using Siemens.Engineering.Hmi.Tag;
+using Siemens.Engineering.Hmi.Globalization;
 using Siemens.Engineering.HW;
 using Siemens.Engineering.HW.Features;
 using TiaMcpServer.Contracts.HmiBasic;
@@ -24,15 +25,40 @@ internal static class HmiBasicService
     internal static HmiBasicListResult List(ProjectBase project, HmiBasicRequest request) => new()
     {
         Devices = (request.Device is null ? Targets(project, null) : new[] { Resolve(project, request.Device) })
-            .Select(target => new HmiBasicDevice
-            {
-                Device = target.Device,
-                Hmi = target.Hmi.Name,
-                TagTables = Tags(target.Hmi.TagFolder, "").Select(x => new HmiBasicTagTable
-                    { Path = x.Path, Count = x.Table.Tags.Count }).ToArray(),
-                Screens = Screens(target.Hmi.ScreenFolder, "").Select(x => x.Path).ToArray()
-            }).ToArray()
+            .Select(target => ToHmiBasicDevice(project, target)).ToArray()
     };
+
+    private static HmiBasicDevice ToHmiBasicDevice(ProjectBase project, (string Device, HmiTarget Hmi) target)
+    {
+        var graphics = ReadProjectGraphics(target.Hmi);
+        if (graphics.Coverage == "unavailable" && project is Siemens.Engineering.Project standalone)
+            graphics = ReadProjectGraphics(standalone);
+        return new HmiBasicDevice
+        {
+            Device = target.Device,
+            Hmi = target.Hmi.Name,
+            TagTables = Tags(target.Hmi.TagFolder, "").Select(x => new HmiBasicTagTable
+                { Path = x.Path, Count = x.Table.Tags.Count }).ToArray(),
+            Screens = Screens(target.Hmi.ScreenFolder, "").Select(x => x.Path).ToArray(),
+            Graphics = graphics.Graphics,
+            GraphicsCoverage = graphics.Coverage
+        };
+    }
+
+    private static (string[] Graphics, string Coverage) ReadProjectGraphics(IEngineeringServiceProvider owner)
+    {
+        try
+        {
+            var provider = owner.GetService<GraphicsProvider>();
+            if (provider is null) return (Array.Empty<string>(), "unavailable");
+            return (provider.Graphics.Select(graphic => graphic.Name).Where(name => !string.IsNullOrWhiteSpace(name))
+                .OrderBy(name => name, StringComparer.Ordinal).ToArray(), "provider");
+        }
+        catch (EngineeringException ex) when (OpennessExceptions.IsRecoverablePropertyFailure(ex))
+        {
+            return (Array.Empty<string>(), "unavailable");
+        }
+    }
 
     internal static HmiBasicExportResult Export(ProjectBase project, HmiBasicRequest request)
     {

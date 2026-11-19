@@ -662,6 +662,11 @@ while ((line = Console.In.ReadLine()) is not null)
         case "vci-read-roundtrip":
             Respond(TiaMcpServer.FakeWorker.Vci.VciReadRoundtripScenario.Handle(line));
             break;
+        case "hmi-basic-graphics":
+            Respond(currentMethod == "hmi_basic_list"
+                ? Success("""{"devices":[{"device":"Panel","hmi":"Runtime","tagTables":[],"screens":[],"graphics":["Graphic_1"],"graphicsCoverage":"provider"},{"device":"Unavailable","hmi":"Runtime","tagTables":[],"screens":[],"graphics":[],"graphicsCoverage":"unavailable"}]}""")
+                : """{"success":false,"error":"unexpected Basic HMI graphics fixture method"}""");
+            break;
         case "hmi-read-roundtrip":
             Respond(ReadMethod(line) switch
             {
